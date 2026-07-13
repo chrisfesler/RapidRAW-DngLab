@@ -129,6 +129,32 @@ impl RawDevelop {
   /// If demosaic is disabled or camera raw is monochrome, the TIFF
   /// has only one color channel.
   pub fn develop_intermediate(&self, rawimage: &RawImage) -> crate::Result<Intermediate> {
+    self.develop_intermediate_impl(rawimage, None)
+  }
+
+  /// Develop only a region of interest — used by shortstack's 100% peek
+  /// (shortstack-352.5) so a single crop does not pay for demosaicing the whole
+  /// 60 MP frame.
+  ///
+  /// `roi` is in rescaled-raw coordinates, the same space as
+  /// [`RawImage::active_area`]. Demosaic runs over `roi` instead of the full
+  /// active area, and the DefaultCrop step is skipped (the caller's `roi`
+  /// already IS the crop neighbourhood). Every other step
+  /// (Rescale/WhiteBalance/Calibrate/SRgb) is identical to
+  /// [`Self::develop_intermediate`], and those steps are all point operations,
+  /// so any pixel far enough from the `roi` border to escape the demosaic's
+  /// edge handling is bit-equivalent to developing the full frame and slicing
+  /// the same region. The returned image is `roi`-sized with its top-left at
+  /// `roi.p` in raw coordinates.
+  pub fn develop_intermediate_roi(&self, rawimage: &RawImage, roi: Rect) -> crate::Result<Intermediate> {
+    self.develop_intermediate_impl(rawimage, Some(roi))
+  }
+
+  /// Shared body for [`Self::develop_intermediate`] and
+  /// [`Self::develop_intermediate_roi`]. When `demosaic_roi` is `Some`, the
+  /// demosaic is scoped to that ROI and the DefaultCrop step is skipped; when
+  /// `None`, the behaviour is the stock full-frame develop.
+  fn develop_intermediate_impl(&self, rawimage: &RawImage, demosaic_roi: Option<Rect>) -> crate::Result<Intermediate> {
     let mut rawimage = rawimage.clone();
     if self.steps.contains(&ProcessingStep::Rescale) {
       rawimage.apply_scaling()?;
@@ -162,10 +188,10 @@ impl RawDevelop {
               config.cfa.is_rgb()
           );
           if let Intermediate::Monochrome(ref pixels) = intermediate {
-            let roi = if self.steps.contains(&ProcessingStep::CropActiveArea) {
-              rawimage.active_area.unwrap_or(pixels.rect())
-            } else {
-              pixels.rect()
+            let roi = match demosaic_roi {
+              Some(roi) => roi,
+              None if self.steps.contains(&ProcessingStep::CropActiveArea) => rawimage.active_area.unwrap_or(pixels.rect()),
+              None => pixels.rect(),
             };
             if config.cfa.is_rgb() {
               // Check if this is an X-Trans sensor (6x6 pattern) 
@@ -260,7 +286,9 @@ impl RawDevelop {
       }
     }
 
-    if self.steps.contains(&ProcessingStep::CropDefault) {
+    // A ROI-scoped develop skips DefaultCrop: the caller's `roi` already IS the
+    // crop neighbourhood, so the demosaic output needs no further cropping here.
+    if demosaic_roi.is_none() && self.steps.contains(&ProcessingStep::CropDefault) {
       if let Some(mut crop) = rawimage.crop_area {
         if self.steps.contains(&ProcessingStep::Demosaic) && self.steps.contains(&ProcessingStep::CropActiveArea) {
           if let Some(active_area) = rawimage.active_area {
