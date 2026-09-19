@@ -14,7 +14,7 @@ use crate::{
     chromatic_adaption::adapt_bradford,
     fuji_rotate::fuji_normalize_rotation,
     matrix::{IDENTITY_MATRIX_3, transform_1d},
-    sensor::{Demosaic, SensorType, xtrans::bilinear::XTransBilinearDemosaic},
+    sensor::{Demosaic, SensorType},
   },
   pixarray::{Color2D, PixF32},
   rawimage::RawPhotometricInterpretation,
@@ -25,7 +25,12 @@ use crate::{
 use super::{
   Dim2, Rect, convert_from_f32_scaled_u16,
   raw::{map_3ch_to_rgb, map_4ch_to_rgb},
-  sensor::bayer::{bilinear::Bilinear4Channel, ppg::PPGDemosaic},
+  sensor::bayer::{
+    bilinear::Bilinear4Channel,
+    ppg::PPGDemosaic,
+    superpixel::{Superpixel4Channel, SuperpixelQuarterRes3Channel},
+  },
+  sensor::xtrans::demosaic::{XTransDemosaic, XTransSuperpixelDemosaic},
   xyz::Illuminant,
 };
 
@@ -76,6 +81,17 @@ pub enum ProcessingStep {
   SRgb,
 }
 
+/// The demosaicing algorithm to use.
+#[derive(PartialEq, Eq, Debug, Clone, Copy, Default)]
+pub enum DemosaicAlgorithm {
+  /// High-quality demosaicing (PPG for Bayer, Full-Res for X-Trans).
+  #[default]
+  Quality,
+  /// High-speed demosaicing using a superpixel algorithm (e.g. for thumbnails).
+  /// This reduces image dimensions by a factor of four (quarter width and height).
+  Speed,
+}
+
 pub struct RawDevelopBuilder {}
 
 #[derive(Clone)]
@@ -123,6 +139,7 @@ impl Intermediate {
 #[derive(Clone)]
 pub struct RawDevelop {
   pub steps: Vec<ProcessingStep>,
+  pub demosaic_algorithm: DemosaicAlgorithm,
 }
 
 impl Default for RawDevelop {
@@ -138,13 +155,17 @@ impl Default for RawDevelop {
         ProcessingStep::CropDefault,
         ProcessingStep::SRgb,
       ],
+      demosaic_algorithm: DemosaicAlgorithm::default(),
     }
   }
 }
 
 impl RawDevelop {
   pub fn new_with(steps: &[ProcessingStep]) -> Self {
-    Self { steps: Vec::from(steps) }
+    Self {
+      steps: Vec::from(steps),
+      demosaic_algorithm: DemosaicAlgorithm::default(),
+    }
   }
 
   /*
@@ -188,7 +209,16 @@ impl RawDevelop {
     if self.steps.contains(&ProcessingStep::Demosaic) {
       intermediate = match &rawimage.photometric {
         RawPhotometricInterpretation::Cfa(config) => {
-          if let Intermediate::Monochrome(pixels) = intermediate {
+          log::info!(
+              "Demosaicing check for '{} {}': CFA name='{}', width={}, height={}, is_rgb={}",
+              rawimage.clean_make,
+              rawimage.clean_model,
+              config.cfa.name,
+              config.cfa.width,
+              config.cfa.height,
+              config.cfa.is_rgb()
+          );
+          if let Intermediate::Monochrome(ref pixels) = intermediate {
             let roi = if self.steps.contains(&ProcessingStep::CropActiveArea) {
               if rawimage.active_area.is_some() && rawimage.fuji_rotation_width.is_some() {
                 panic!("ActiveArea is not possible when rotation is not normalized");
@@ -198,26 +228,60 @@ impl RawDevelop {
               pixels.rect()
             };
             if config.cfa.is_rgb() && config.sensor == SensorType::Bayer {
-              let ppg = PPGDemosaic::new();
-              let mut rgb = ppg.demosaic(&pixels, &config.cfa, &config.colors, roi);
+              let mut rgb = match self.demosaic_algorithm {
+                DemosaicAlgorithm::Quality => {
+                  let ppg = PPGDemosaic::new();
+                  ppg.demosaic(&pixels, &config.cfa, &config.colors, roi)
+                }
+                DemosaicAlgorithm::Speed => {
+                  let superpixel = SuperpixelQuarterRes3Channel::new();
+                  superpixel.demosaic(&pixels, &config.cfa, &config.colors, roi)
+                }
+              };
 
               // Fuji Rotate
               if self.steps.contains(&ProcessingStep::FujiRotate)
                 && let Some(fuji_rotation_width) = rawimage.fuji_rotation_width
               {
-                let extra_rotate = rawimage.camera.find_hint("fuji_rotate_90cw");
-                rgb = fuji_normalize_rotation(&rgb, fuji_rotation_width, extra_rotate);
-                log::debug!("dimension after rotate {:?}", rgb.dim());
+                match self.demosaic_algorithm {
+                  DemosaicAlgorithm::Quality => {
+                    let extra_rotate = rawimage.camera.find_hint("fuji_rotate_90cw");
+                    rgb = fuji_normalize_rotation(&rgb, fuji_rotation_width, extra_rotate);
+                    log::debug!("dimension after rotate {:?}", rgb.dim());
+                  }
+                  DemosaicAlgorithm::Speed => {
+                    // fuji_rotation_width is in full-resolution units; the superpixel
+                    // output is downscaled, so the rotation step is skipped here.
+                    log::warn!("FujiRotate is not applied for DemosaicAlgorithm::Speed output");
+                  }
+                }
               }
               Intermediate::ThreeColor(rgb)
             } else if config.cfa.unique_colors() == 4 && config.sensor == SensorType::Bayer {
-              let linear = Bilinear4Channel::new();
-              Intermediate::FourColor(linear.demosaic(&pixels, &config.cfa, &config.colors, roi))
+              match self.demosaic_algorithm {
+                DemosaicAlgorithm::Quality => {
+                  let linear = Bilinear4Channel::new();
+                  Intermediate::FourColor(linear.demosaic(&pixels, &config.cfa, &config.colors, roi))
+                }
+                DemosaicAlgorithm::Speed => {
+                  let superpixel = Superpixel4Channel::new();
+                  Intermediate::FourColor(superpixel.demosaic(&pixels, &config.cfa, &config.colors, roi))
+                }
+              }
             } else if config.cfa.is_rgb() && config.sensor == SensorType::Xtrans {
-              let xtrans_demosaic = XTransBilinearDemosaic::new();
-              Intermediate::ThreeColor(xtrans_demosaic.demosaic(&pixels, &config.cfa, &config.colors, roi))
+              match self.demosaic_algorithm {
+                DemosaicAlgorithm::Quality => {
+                  let xtrans_demosaic = XTransDemosaic::new();
+                  Intermediate::ThreeColor(xtrans_demosaic.demosaic(&pixels, &config.cfa, &config.colors, roi))
+                }
+                DemosaicAlgorithm::Speed => {
+                  let xtrans_demosaic = XTransSuperpixelDemosaic::new();
+                  Intermediate::ThreeColor(xtrans_demosaic.demosaic(&pixels, &config.cfa, &config.colors, roi))
+                }
+              }
             } else {
-              todo!()
+                log::warn!("Unsupported CFA pattern '{}' for demosaicing. Passing through without demosaicing.", config.cfa.name);
+                Intermediate::Monochrome(pixels.clone())
             }
           } else {
             intermediate
@@ -291,21 +355,20 @@ impl RawDevelop {
       log::debug!("active_area: {:?}", rawimage.active_area);
       if let Some(mut crop) = rawimage.crop_area.or(rawimage.active_area) {
         if self.steps.contains(&ProcessingStep::Demosaic) && self.steps.contains(&ProcessingStep::CropActiveArea) {
-          // If active area crop was already applied during demosaic, we need to
-          // adapt default crop to active area crop.
-          if let Some(active_area) = &rawimage.active_area {
-            crop = crop.adapt(active_area);
-            log::debug!("Adapt crop to active_area: {:?}", crop);
+          if let Some(active_area) = rawimage.active_area {
+            let intersection = crop.intersection(&active_area);
+            crop = intersection.adapt(&active_area);
           }
         }
-        if intermediate.dim().w == rawimage.active_area.map(|area| area.d).unwrap_or(rawimage.dim()).w / 2 {
-          // Superpixel debayer used
-          crop.scale(0.5);
-          log::debug!("Scale crop to 0.5: {:?}", crop);
+        let original_width = rawimage.active_area.map(|area| area.d.w).unwrap_or(rawimage.dim().w);
+        if original_width > 0 {
+            let scale_factor = intermediate.dim().w as f32 / original_width as f32;
+            if (scale_factor - 1.0).abs() > 1e-6 {
+                crop.scale(scale_factor);
+            }
         }
-        // Only apply crop if dimensions differ.
-        if crop.d != intermediate.dim() {
-          log::debug!("crop: {:?}, intermediate dim: {:?}, rawimage: {:?}", crop, intermediate.dim(), rawimage.dim());
+        if !crop.is_empty() && crop.d != intermediate.dim() {
+          log::info!("crop: {:?}, intermediate dim: {:?}, rawimage: {:?}", crop, intermediate.dim(), rawimage.dim());
           intermediate = match intermediate {
             Intermediate::Monochrome(pixels) => Intermediate::Monochrome(pixels.crop(crop)),
             Intermediate::ThreeColor(pixels) => Intermediate::ThreeColor(pixels.crop(crop)),

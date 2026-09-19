@@ -178,11 +178,17 @@ fn unpack_generic_msb<'a>(lines: impl LineIteratorMut<'a, u16>, src: &[u8], skip
     return Err(format!("unpack_generic_msb(): buffer too short ({} < {})", src.len(), need));
   }
   assert!(bits <= 16);
+
   let skip_bits = skip_rows * width * bits as usize;
-  let offset = skip_bits / 8;
-  let bias = skip_bits % 8;
-  let mut pump = BitPumpMSB::new(&src[offset..]);
-  pump.consume_bits(bias as u32);
+  let skip_bytes = skip_bits / 8;
+  let skip_rem = (skip_bits % 8) as u32;
+
+  let mut pump = BitPumpMSB::new(&src[skip_bytes..]);
+
+  if skip_rem > 0 {
+    pump.get_bits(skip_rem);
+  }
+
   for line in lines {
     for p in line {
       *p = pump.get_bits(bits) as u16;

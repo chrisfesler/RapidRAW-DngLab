@@ -1016,7 +1016,10 @@ impl RawLoader {
             "Panasonic" => return use_decoder!(rw2::Rw2Decoder, rawfile, tiff, self),
             "LEICA" => return use_decoder!(rw2::Rw2Decoder, rawfile, tiff, self),
             "LEICA CAMERA AG" => return use_decoder!(rw2::Rw2Decoder, rawfile, tiff, self),
-            //"FUJIFILM" => return use_decoder!(raf::RafDecoder, rawfile, tiff, self),
+            "FUJIFILM" => {
+              let dec = Box::new(raf::RafDecoder::new(rawfile, self)?);
+              return Ok(dec as Box<dyn Decoder>);
+            },
             "NIKON" => return use_decoder!(nrw::NrwDecoder, rawfile, tiff, self),
             "Nikon" => return use_decoder!(nef::NefDecoder, rawfile, tiff, self),
             "NIKON CORPORATION" => return use_decoder!(nef::NefDecoder, rawfile, tiff, self),

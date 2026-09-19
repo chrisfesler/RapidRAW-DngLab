@@ -511,6 +511,19 @@ where
     out
   }
 
+  pub fn make_padded(&self, padding: usize) -> Self {
+    let new_w = self.width + padding * 2;
+    let new_h = self.height + padding * 2;
+    let mut padded = Self::new(new_w, new_h);
+
+    for y in 0..self.height {
+      for x in 0..self.width {
+        *padded.at_mut(y + padding, x + padding) = *self.at(y, x);
+      }
+    }
+    padded
+  }
+
   pub fn rotate_180(&self) -> Self {
     let data = self.pixels().iter().rev().copied().collect_vec();
     Self::new_with(data, self.width, self.height)
