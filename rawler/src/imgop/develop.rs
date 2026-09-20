@@ -31,6 +31,7 @@ use super::{
     superpixel::{Superpixel4Channel, SuperpixelQuarterRes3Channel},
   },
   sensor::xtrans::demosaic::{XTransDemosaic, XTransSuperpixelDemosaic},
+  sensor::xtrans::markesteijn::XTransMarkesteijnDemosaic,
   xyz::Illuminant,
 };
 
@@ -90,6 +91,10 @@ pub enum DemosaicAlgorithm {
   /// High-speed demosaicing using a superpixel algorithm (e.g. for thumbnails).
   /// This reduces image dimensions by a factor of four (quarter width and height).
   Speed,
+  /// X-Trans reference demosaic (Markesteijn; `passes` is 1 or 3).
+  /// Non-X-Trans sensors fall back to `Quality`, so a caller that does not know
+  /// the sensor type up front can set this unconditionally.
+  XTransMarkesteijn { passes: usize },
 }
 
 pub struct RawDevelopBuilder {}
@@ -257,7 +262,7 @@ impl RawDevelop {
             };
             if config.cfa.is_rgb() && config.sensor == SensorType::Bayer {
               let mut rgb = match self.demosaic_algorithm {
-                DemosaicAlgorithm::Quality => {
+                DemosaicAlgorithm::Quality | DemosaicAlgorithm::XTransMarkesteijn { .. } => {
                   let ppg = PPGDemosaic::new();
                   ppg.demosaic(&pixels, &config.cfa, &config.colors, roi)
                 }
@@ -272,7 +277,7 @@ impl RawDevelop {
                 && let Some(fuji_rotation_width) = rawimage.fuji_rotation_width
               {
                 match self.demosaic_algorithm {
-                  DemosaicAlgorithm::Quality => {
+                  DemosaicAlgorithm::Quality | DemosaicAlgorithm::XTransMarkesteijn { .. } => {
                     let extra_rotate = rawimage.camera.find_hint("fuji_rotate_90cw");
                     rgb = fuji_normalize_rotation(&rgb, fuji_rotation_width, extra_rotate);
                     log::debug!("dimension after rotate {:?}", rgb.dim());
@@ -287,7 +292,7 @@ impl RawDevelop {
               Intermediate::ThreeColor(rgb)
             } else if config.cfa.unique_colors() == 4 && config.sensor == SensorType::Bayer {
               match self.demosaic_algorithm {
-                DemosaicAlgorithm::Quality => {
+                DemosaicAlgorithm::Quality | DemosaicAlgorithm::XTransMarkesteijn { .. } => {
                   let linear = Bilinear4Channel::new();
                   Intermediate::FourColor(linear.demosaic(&pixels, &config.cfa, &config.colors, roi))
                 }
@@ -300,6 +305,10 @@ impl RawDevelop {
               match self.demosaic_algorithm {
                 DemosaicAlgorithm::Quality => {
                   let xtrans_demosaic = XTransDemosaic::new();
+                  Intermediate::ThreeColor(xtrans_demosaic.demosaic(&pixels, &config.cfa, &config.colors, roi))
+                }
+                DemosaicAlgorithm::XTransMarkesteijn { passes } => {
+                  let xtrans_demosaic = XTransMarkesteijnDemosaic::new(passes);
                   Intermediate::ThreeColor(xtrans_demosaic.demosaic(&pixels, &config.cfa, &config.colors, roi))
                 }
                 DemosaicAlgorithm::Speed => {
