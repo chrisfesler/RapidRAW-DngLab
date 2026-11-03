@@ -218,6 +218,23 @@ impl RawDevelop {
     render(rawimage, &self.render_options())
   }
 
+  /// shortstack (fork): develop only `roi` of the CFA data, for the 100% peek,
+  /// so one crop does not pay for demosaicing the whole frame. `roi` is in the
+  /// coordinates of the image data as read from the file, the space of
+  /// [`RawImage::active_area`], and is intersected with the ActiveArea when
+  /// CropActiveArea is a step. The crop steps crop nothing else, so the image
+  /// has the size of the ROI. The other steps are point operations, so a pixel
+  /// far enough from the ROI border to escape the demosaic's edge handling is
+  /// equal to the same pixel of [`Self::develop_image`]. See
+  /// [`RenderOptions::demosaic_roi`].
+  pub fn develop_image_roi(&self, rawimage: RawImage, roi: Rect) -> crate::Result<RenderedImage> {
+    let options = RenderOptions {
+      demosaic_roi: Some(roi),
+      ..self.render_options()
+    };
+    render(rawimage, &options)
+  }
+
   /// Develop raw image and write result into TIFF.
   /// If demosaic is disabled or camera raw is monochrome, the TIFF
   /// has only one color channel.

@@ -189,6 +189,14 @@ pub struct RenderOptions {
   /// Color space of the output: the Calibrate step maps the camera values to
   /// it, the TransferFunction step encodes the values by its transfer function
   pub color_space: OutputSpace,
+  /// shortstack (fork): demosaic only this area of the CFA data and render
+  /// the result of that size, for the 100% peek. The area is in the
+  /// coordinates of the image data as read from the file (the space of the
+  /// ActiveArea) and is intersected with the ActiveArea when CropActiveArea
+  /// is a step; the CropActiveArea and CropDefault steps crop nothing else.
+  /// Needs CFA data with the Demosaic step; images of rotated sensors and
+  /// images with an OpcodeList3 are rejected.
+  pub demosaic_roi: Option<Rect>,
 }
 
 impl Default for RenderOptions {
@@ -199,6 +207,7 @@ impl Default for RenderOptions {
       white_balance: WhiteBalancePlacement::default(),
       demosaic: DemosaicQuality::default(),
       color_space: OutputSpace::default(),
+      demosaic_roi: None,
     }
   }
 }
@@ -607,6 +616,46 @@ mod tests {
     assert_eq!(algorithm_of(&bayer, DemosaicQuality::Preview)?, Some(DemosaicAlgorithm::Superpixel3));
     bayer.fuji_rotation_width = Some(4);
     assert_eq!(algorithm_of(&bayer, DemosaicQuality::Preview)?, Some(DemosaicAlgorithm::Ppg));
+    Ok(())
+  }
+
+  /// shortstack (fork): a ROI develop is the ROI of the full develop, away
+  /// from the ROI border, and skips the crops
+  #[test]
+  fn roi_develop_is_a_slice_of_the_full_develop() -> crate::Result<()> {
+    let mut camera = Camera::new();
+    camera.cfa = CFA::new("RGGB");
+    let photometric = RawPhotometricInterpretation::Cfa(CFAConfig::new_from_camera(&camera));
+    let (width, height) = (48, 40);
+    let samples: Vec<u16> = (0..width * height).map(|i| ((i * 37) % 3000 + 100) as u16).collect();
+    let mut rawimage = RawImage::new(
+      camera,
+      PixU16::new_with(samples, width, height),
+      1,
+      [2.0, 1.0, 1.5, f32::NAN],
+      photometric,
+      Some(BlackLevel::zero(2, 2, 1)),
+      Some(WhiteLevel::new_bits(12, 1)),
+      false,
+    );
+    rawimage.active_area = Some(Rect::new(Point::new(2, 2), Dim2::new(44, 36)));
+    rawimage.crop_area = Some(Rect::new(Point::new(4, 4), Dim2::new(40, 32)));
+    let options = RenderOptions::default();
+    let roi = Rect::new(Point::new(8, 6), Dim2::new(24, 20));
+    let full = render(rawimage.clone(), &options)?;
+    let plan = plan(&rawimage, &RenderOptions { demosaic_roi: Some(roi), ..options.clone() })?;
+    assert_eq!(op_names(&plan), ["RescaleMosaic", "Demosaic", "CameraToRgb"]);
+    let part = execute(rawimage, &plan)?;
+    assert_eq!((part.width, part.height, part.channels), (roi.d.w, roi.d.h, 3));
+    // The full develop is the DefaultCrop: a ROI pixel is at (roi - crop) in it
+    let (dx, dy) = (roi.p.x - 4, roi.p.y - 4);
+    for y in 8..roi.d.h - 8 {
+      for x in 8..roi.d.w - 8 {
+        let a = &full.data[((y + dy) * full.width + x + dx) * 3..][..3];
+        let b = &part.data[(y * part.width + x) * 3..][..3];
+        assert_eq!(a, b, "pixel ({x}, {y}) of the ROI");
+      }
+    }
     Ok(())
   }
 

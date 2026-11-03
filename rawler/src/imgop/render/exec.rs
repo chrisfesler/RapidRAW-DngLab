@@ -205,7 +205,8 @@ impl Executor {
         cfa,
         crop_to_active_area,
         crop_default,
-      } => self.demosaic(*algorithm, cfa, *crop_to_active_area, *crop_default)?,
+        roi,
+      } => self.demosaic(*algorithm, cfa, *crop_to_active_area, *crop_default, *roi)?,
       Op::FujiRotate { width, extra_rotate } => {
         // Masks are not rotated
         if self.rawimage.transparency_mask.take().is_some() {
@@ -322,20 +323,31 @@ impl Executor {
   }
 
   /// Demosaic the image data, see [`Op::Demosaic`]
-  fn demosaic(&mut self, algorithm: DemosaicAlgorithm, cfa: &CFAConfig, crop_to_active_area: bool, crop_default: bool) -> crate::Result<()> {
+  fn demosaic(
+    &mut self,
+    algorithm: DemosaicAlgorithm,
+    cfa: &CFAConfig,
+    crop_to_active_area: bool,
+    crop_default: bool,
+    demosaic_roi: Option<Rect>,
+  ) -> crate::Result<()> {
     let (stage3_area, _) = self.stage3_area();
     let crop = self.crop_area.or(self.active_area).filter(|_| crop_default);
     let image = self.image();
     let bounds = if crop_to_active_area { stage3_area } else { image.view().rect() };
-    let roi = crop
-      .and_then(|crop| {
-        let margin = Rect::new_with_points(
-          Point::new(crop.p.x.saturating_sub(DEMOSAIC_MARGIN), crop.p.y.saturating_sub(DEMOSAIC_MARGIN)),
-          Point::new(crop.p.x + crop.d.w + DEMOSAIC_MARGIN, crop.p.y + crop.d.h + DEMOSAIC_MARGIN),
-        );
-        margin.intersect(&bounds)
-      })
-      .unwrap_or(bounds);
+    let roi = match demosaic_roi {
+      // shortstack (fork): the caller's ROI is the result, within the bounds
+      Some(roi) => roi.intersect(&bounds).ok_or("The ROI of the develop is outside of the image data")?,
+      None => crop
+        .and_then(|crop| {
+          let margin = Rect::new_with_points(
+            Point::new(crop.p.x.saturating_sub(DEMOSAIC_MARGIN), crop.p.y.saturating_sub(DEMOSAIC_MARGIN)),
+            Point::new(crop.p.x + crop.d.w + DEMOSAIC_MARGIN, crop.p.y + crop.d.h + DEMOSAIC_MARGIN),
+          );
+          margin.intersect(&bounds)
+        })
+        .unwrap_or(bounds),
+    };
     let pixels = image.view();
     let demosaiced = match algorithm {
       DemosaicAlgorithm::Ppg => PPGDemosaic::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
@@ -363,7 +375,12 @@ impl Executor {
     }
     let scale_point = |p: Point| Point::new(p.x / factor, p.y / factor);
     let scale = |rect: Rect| Rect::new(scale_point(rect.p), Dim2::new(rect.d.w / factor, rect.d.h / factor));
-    if let Some(crop) = crop {
+    if demosaic_roi.is_some() {
+      // The ROI is the result: the gain table map refers to the stage 3 image
+      // in the coordinates of the mosaic data, the crop steps crop nothing
+      (self.stage3_area, self.origin) = (Some(scale(stage3_area)), scale_point(roi.p));
+      (self.active_area, self.crop_area) = (None, None);
+    } else if let Some(crop) = crop {
       // The pixels of the margin are cropped, the gain table map refers to the
       // stage 3 image in the coordinates of the mosaic data
       let relative = crop.rebase(&roi);

@@ -11,6 +11,7 @@ use crate::{
     profile_render::{ProfileRender, ToneCurve, prophoto_to_rgb, rgb_to_prophoto},
   },
   imgop::{
+    Rect,
     color::{CameraToRgb, OutputSpace, PixelOp, TransferFunction, camera_to_output},
     matrix::multiply,
     raw::WhiteBalance,
@@ -42,11 +43,14 @@ pub(super) enum Op {
   /// Demosaic CFA data, cropped to the ActiveArea with `crop_to_active_area`.
   /// With `crop_default`, only the DefaultCrop and a margin around it for the
   /// interpolation are demosaiced, then the image is cropped to it.
+  /// With `roi` (shortstack fork), only that area is demosaiced and the
+  /// result is the area.
   Demosaic {
     algorithm: DemosaicAlgorithm,
     cfa: Box<CFAConfig>,
     crop_to_active_area: bool,
     crop_default: bool,
+    roi: Option<Rect>,
   },
   /// Rotate an RGB image of a sensor with a 45° layout
   FujiRotate { width: usize, extra_rotate: bool },
@@ -126,6 +130,11 @@ pub fn plan(rawimage: &RawImage, options: &RenderOptions) -> crate::Result<Plan>
   };
   let demosaic = mosaic.map(|config| demosaic_algorithm(config, quality)).transpose()?;
   let channels = demosaic.map_or(rawimage.cpp, |(_, planes)| planes);
+  // shortstack (fork): a ROI develop demosaics the ROI only, see RenderOptions
+  let roi = options.demosaic_roi;
+  if roi.is_some() && (demosaic.is_none() || linear_raw) {
+    return Err("A ROI develop needs CFA data with the Demosaic step and renders an image".into());
+  }
 
   // As shot white balance, some old images may not provide WB coeffs. Like
   // the camera neutral of DNG readers, the coefficients are normalized to a
@@ -198,14 +207,20 @@ pub fn plan(rawimage: &RawImage, options: &RenderOptions) -> crate::Result<Plan>
       let fuji_rotation_width = rawimage
         .fuji_rotation_width
         .filter(|_| algorithm == DemosaicAlgorithm::Ppg && steps.contains(Step::FujiRotate));
+      if roi.is_some() && (fuji_rotation_width.is_some() || list3) {
+        return Err("A ROI develop is not possible with a rotated sensor or an OpcodeList3".into());
+      }
       // Without operations on the whole stage 3 image, only the DefaultCrop is demosaiced
       cropped = crop_default && fuji_rotation_width.is_none() && !list3;
       ops.push(Op::Demosaic {
         algorithm,
         cfa: Box::new(config.clone()),
         crop_to_active_area,
-        crop_default: cropped,
+        crop_default: cropped && roi.is_none(),
+        roi,
       });
+      // The ROI is the result, the crop steps are done
+      cropped |= roi.is_some();
       if let Some(width) = fuji_rotation_width {
         let extra_rotate = rawimage.camera.find_hint("fuji_rotate_90cw");
         ops.push(Op::FujiRotate { width, extra_rotate });
