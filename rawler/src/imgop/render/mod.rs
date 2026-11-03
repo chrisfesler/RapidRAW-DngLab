@@ -162,6 +162,17 @@ pub enum DemosaicQuality {
   /// (superpixel), bilinear interpolation for X-Trans data. Images of rotated
   /// sensors (Fujifilm) are demosaiced like Fast.
   Preview,
+  /// shortstack (fork): the screen tier. Quarter size for Bayer data: each 4x4
+  /// block is one pixel (superpixel); four-colour Bayer data is demosaiced like
+  /// Preview. X-Trans data is averaged per 6x6 block at full size. Images of
+  /// rotated sensors (Fujifilm) are demosaiced like Fast.
+  Speed,
+  /// shortstack (fork): PPG for Bayer, the fork's hand-rolled four-pass
+  /// interpolation for X-Trans data
+  XTransHandRolled,
+  /// shortstack (fork): PPG for Bayer, Markesteijn with `passes` (1 or 3) for
+  /// X-Trans data
+  Markesteijn { passes: usize },
 }
 
 /// Options of the rendering
@@ -569,12 +580,28 @@ mod tests {
       }))
     };
     for (demosaic, algorithm) in [
-      (DemosaicQuality::Quality, DemosaicAlgorithm::Markesteijn),
+      (DemosaicQuality::Quality, DemosaicAlgorithm::Markesteijn { passes: 3 }),
       (DemosaicQuality::Fast, DemosaicAlgorithm::XTransBilinear),
       (DemosaicQuality::Preview, DemosaicAlgorithm::XTransBilinear),
+      // shortstack (fork)
+      (DemosaicQuality::Speed, DemosaicAlgorithm::XTransSuperpixel),
+      (DemosaicQuality::XTransHandRolled, DemosaicAlgorithm::XTransHandRolled),
+      (DemosaicQuality::Markesteijn { passes: 1 }, DemosaicAlgorithm::Markesteijn { passes: 1 }),
     ] {
       assert_eq!(algorithm_of(&rawimage, demosaic)?, Some(algorithm), "{:?}", demosaic);
     }
+    // shortstack (fork): Speed is a quarter of the size for Bayer data, PPG otherwise
+    let bayer = rggb_rawimage();
+    assert_eq!(algorithm_of(&bayer, DemosaicQuality::Speed)?, Some(DemosaicAlgorithm::Superpixel3Quarter));
+    for demosaic in [DemosaicQuality::XTransHandRolled, DemosaicQuality::Markesteijn { passes: 1 }] {
+      assert_eq!(algorithm_of(&bayer, demosaic)?, Some(DemosaicAlgorithm::Ppg), "{:?}", demosaic);
+    }
+    let speed = RenderOptions {
+      demosaic: DemosaicQuality::Speed,
+      ..Default::default()
+    };
+    let (full, quarter) = (render(bayer.clone(), &RenderOptions::default())?, render(bayer, &speed)?);
+    assert_eq!((quarter.width, quarter.height, quarter.channels), (full.width / 4, full.height / 4, 3));
     // Bayer data of half size for previews, but rotated sensors are rotated at full size
     let mut bayer = rggb_rawimage();
     assert_eq!(algorithm_of(&bayer, DemosaicQuality::Preview)?, Some(DemosaicAlgorithm::Superpixel3));

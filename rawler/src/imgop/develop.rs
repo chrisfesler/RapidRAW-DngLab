@@ -14,7 +14,7 @@ use crate::{
   imgop::{
     Dim2, Point, Rect,
     color::{OutputSpace, TransferFunction},
-    render::{RenderOptions, RenderedImage, render},
+    render::{DemosaicQuality, RenderOptions, RenderedImage, render},
   },
   rawsource::RawSource,
   tags::{ExifTag, TiffCommonTag},
@@ -168,6 +168,9 @@ pub struct RawDevelop {
   pub steps: Vec<ProcessingStep>,
   /// Color space of the developed image
   pub color_space: OutputSpace,
+  /// Quality of the Demosaic step (shortstack fork: an option of the
+  /// development, so the screen tier and the peek pick their algorithm)
+  pub demosaic: DemosaicQuality,
 }
 
 impl Default for RawDevelop {
@@ -181,6 +184,7 @@ impl RawDevelop {
     Self {
       steps: Vec::from(steps),
       color_space: OutputSpace::default(),
+      demosaic: DemosaicQuality::default(),
     }
   }
 
@@ -201,6 +205,7 @@ impl RawDevelop {
     RenderOptions {
       steps: self.steps.iter().copied().collect(),
       color_space: self.color_space,
+      demosaic: self.demosaic,
       ..Default::default()
     }
   }

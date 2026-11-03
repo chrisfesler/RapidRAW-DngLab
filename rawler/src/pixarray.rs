@@ -528,6 +528,18 @@ where
     self.data
   }
 
+  /// Copy of the image with `padding` default pixels around every side
+  /// (shortstack fork, for the hand-rolled X-Trans demosaic)
+  pub fn make_padded(&self, padding: usize) -> Self {
+    let mut padded = Self::new(self.width + padding * 2, self.height + padding * 2);
+    for y in 0..self.height {
+      for x in 0..self.width {
+        *padded.at_mut(y + padding, x + padding) = *self.at(y, x);
+      }
+    }
+    padded
+  }
+
   pub fn dim(&self) -> Dim2 {
     Dim2::new(self.width, self.height)
   }

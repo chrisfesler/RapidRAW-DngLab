@@ -21,9 +21,13 @@ use crate::{
       bayer::{
         bilinear::Bilinear4Channel,
         ppg::PPGDemosaic,
-        superpixel::{Superpixel3Channel, Superpixel4Channel},
+        superpixel::{Superpixel3Channel, Superpixel4Channel, SuperpixelQuarterRes3Channel},
       },
-      xtrans::{bilinear::XTransBilinearDemosaic, markesteijn::XTransMarkesteijnDemosaic},
+      xtrans::{
+        bilinear::XTransBilinearDemosaic,
+        demosaic::{XTransDemosaic, XTransSuperpixelDemosaic},
+        markesteijn::XTransMarkesteijnDemosaic,
+      },
     },
   },
   pixarray::{ImageView, ImageViewMut},
@@ -337,27 +341,28 @@ impl Executor {
       DemosaicAlgorithm::Ppg => PPGDemosaic::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
       DemosaicAlgorithm::Bilinear4 => Bilinear4Channel::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
       DemosaicAlgorithm::XTransBilinear => XTransBilinearDemosaic::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
-      DemosaicAlgorithm::Markesteijn => XTransMarkesteijnDemosaic::new_pass_3().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
+      DemosaicAlgorithm::Markesteijn { passes } => XTransMarkesteijnDemosaic::new(passes).demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
       DemosaicAlgorithm::Superpixel3 => Superpixel3Channel::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
       DemosaicAlgorithm::Superpixel4 => Superpixel4Channel::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
+      DemosaicAlgorithm::Superpixel3Quarter => SuperpixelQuarterRes3Channel::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
+      DemosaicAlgorithm::XTransHandRolled => XTransDemosaic::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
+      DemosaicAlgorithm::XTransSuperpixel => XTransSuperpixelDemosaic::new().demosaic(pixels, &cfa.cfa, &cfa.colors, roi).into(),
     };
     *image = demosaiced;
     log::debug!("Demosaiced {:?}", roi);
 
-    // Positions in the demosaiced image of half size
-    let half = algorithm.half_size();
+    // Positions in the demosaiced image of reduced size
+    let factor = algorithm.scale();
     self.rawimage.crop_transparency_mask(roi);
-    if half && let Some(mask) = &mut self.rawimage.transparency_mask {
-      mask.half_size();
-    }
-    let scale_point = |p: Point| if half { Point::new(p.x / 2, p.y / 2) } else { p };
-    let scale = |rect: Rect| {
-      if half {
-        Rect::new(scale_point(rect.p), Dim2::new(rect.d.w / 2, rect.d.h / 2))
-      } else {
-        rect
+    if let Some(mask) = &mut self.rawimage.transparency_mask {
+      let mut remaining = factor;
+      while remaining > 1 {
+        mask.half_size();
+        remaining /= 2;
       }
-    };
+    }
+    let scale_point = |p: Point| Point::new(p.x / factor, p.y / factor);
+    let scale = |rect: Rect| Rect::new(scale_point(rect.p), Dim2::new(rect.d.w / factor, rect.d.h / factor));
     if let Some(crop) = crop {
       // The pixels of the margin are cropped, the gain table map refers to the
       // stage 3 image in the coordinates of the mosaic data
